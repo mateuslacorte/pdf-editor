@@ -1,10 +1,11 @@
 'use client';
 
+import '@/lib/polyfills';
 import React, { useState, useCallback } from 'react';
 import { PDFPageItem } from '@/types/pdf';
 import { 
   renderPageThumbnail, 
-  getPdfJs,
+  getPdfJs, 
   extractPageContentForEditing 
 } from '@/lib/pdf-engine';
 import { FileDropzone } from '@/components/FileDropzone';
@@ -33,7 +34,11 @@ export default function PDFEditorHome() {
         const fileId = `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
         updatedFileMap.set(fileId, arrayBuffer);
 
-        const pdf = await pdfjs.getDocument({ data: new Uint8Array(arrayBuffer.slice(0)) }).promise;
+        const pdf = await pdfjs.getDocument({
+          data: new Uint8Array(arrayBuffer.slice(0)),
+          cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
+          cMapPacked: true,
+        }).promise;
         const pageCount = pdf.numPages;
 
         for (let i = 0; i < pageCount; i++) {

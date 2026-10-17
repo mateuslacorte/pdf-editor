@@ -1,3 +1,4 @@
+import '@/lib/polyfills';
 import { PDFDocument, rgb, degrees, StandardFonts } from 'pdf-lib';
 import { PDFPageItem, ExtractedTextItem, ExtractedImageItem } from '@/types/pdf';
 
@@ -5,6 +6,23 @@ let pdfjsLib: any = null;
 
 export async function getPdfJs() {
   if (typeof window === 'undefined') return null;
+
+  // Guarantee ReadableStream[Symbol.asyncIterator] for Safari/WebKit
+  if (typeof ReadableStream !== 'undefined' && !(ReadableStream.prototype as any)[Symbol.asyncIterator]) {
+    (ReadableStream.prototype as any)[Symbol.asyncIterator] = async function* (this: ReadableStream) {
+      const reader = this.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          yield value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    };
+  }
+
   if (!pdfjsLib) {
     const pdfjs = await import('pdfjs-dist');
     pdfjs.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.mjs';
@@ -26,7 +44,7 @@ export async function renderPageThumbnail(
 
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(arrayBuffer.slice(0)),
-    cMapUrl: 'https://unpkg.com/pdfjs-dist@4.10.38/cmaps/',
+    cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
     cMapPacked: true,
   });
 
@@ -69,12 +87,35 @@ export async function extractPageContentForEditing(
 
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(arrayBuffer.slice(0)),
+    cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
+    cMapPacked: true,
   });
 
   const pdf = await loadingTask.promise;
   const page = await pdf.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale: 1.0 });
-  const textContent = await page.getTextContent();
+
+  let textContent: any = { items: [], styles: {} };
+  try {
+    textContent = await page.getTextContent();
+  } catch (err: any) {
+    console.warn('page.getTextContent() error, using reader fallback:', err);
+    try {
+      if (typeof page.streamTextContent === 'function') {
+        const stream = page.streamTextContent();
+        const reader = stream.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value?.items) textContent.items.push(...value.items);
+          if (value?.styles) Object.assign(textContent.styles, value.styles);
+        }
+      }
+    } catch (fallbackErr) {
+      console.warn('Fallback stream text extraction failed:', fallbackErr);
+    }
+  }
+
   const styles = textContent.styles || {};
 
   // Build operator list to populate font objects in page.commonObjs and extract colors
