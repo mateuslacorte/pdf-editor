@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PDF MVP
+
+A fast, lightweight, and privacy-first client-side PDF document manipulation suite built with **Next.js (App Router)**, **TypeScript**, **Tailwind CSS**, **pdf-lib**, and **pdfjs-dist**.
+
+All rendering and manipulation is performed directly in the user's browser, ensuring zero data retention and maximum speed.
+
+## Features
+
+- **Continuous Microsoft Word-Style Editor**: Seamless vertical scrolling through document pages with intuitive thumbnail navigation.
+- **Drag-and-Drop Page Reordering**: Effortlessly reorganize document structure by dragging thumbnails into target positions.
+- **Combine & Merge PDFs**: Append additional PDF documents on-the-fly.
+- **In-Place Text Editing**: Modify text while preserving font family, weight, slant, color, and positioning.
+- **Image & Signature Tools**: Insert, replace, reposition, and resize images and handwritten digital signatures while locking intrinsic aspect ratios.
+- **Bleed & Crop Handling**: Full out-of-page visibility during editing with clean page boundary clipping on export.
+- **High-Performance Architecture**: 60+ FPS hardware-accelerated transforms for fluid dragging and resizing.
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+ (tested on Node 20 / 24)
+- npm, pnpm, or yarn
+
+### Installation
+
+```bash
+npm install
+```
+
+### Production Build & Run
+
+To build and run in production mode:
+
+```bash
+npm run build
+npm run start
+```
+
+Open [http://localhost:3000](http://localhost:3000) to view the application.
+
+### Development
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## License
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Private / Proprietary
