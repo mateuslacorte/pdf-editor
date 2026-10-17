@@ -13,6 +13,7 @@ export interface ExtractedTextItem {
   color: string;
   isBold: boolean;
   isItalic: boolean;
+  hasBeenModified?: boolean;
   isCustomAdded?: boolean;
 }
 

@@ -233,7 +233,7 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
       return {
         ...page,
         textItems: page.textItems.map((item) =>
-          item.id === id ? { ...item, ...updates } : item
+          item.id === id ? { ...item, ...updates, hasBeenModified: true } : item
         ),
       };
     });
@@ -279,7 +279,7 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
         ...page,
         textItems: page.textItems.map((item) =>
           item.id === id
-            ? { ...item, currentText: item.originalText, isDeleted: false }
+            ? { ...item, currentText: item.originalText, isDeleted: false, hasBeenModified: false }
             : item
         ),
       };
@@ -612,6 +612,58 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
         {/* CONTEXTUAL WORD-STYLE TEXT TOOLBAR */}
         {activeText ? (
           <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1 rounded-xl shadow-xs animate-fadeIn">
+            {/* Font Family selector */}
+            <select
+              value={activeText.fontFamily || 'Arial, Helvetica, sans-serif'}
+              onChange={(e) => updateSelectedText({ fontFamily: e.target.value })}
+              className="bg-white border border-slate-200 px-2 py-1 rounded text-xs font-medium text-slate-800 max-w-[140px] truncate outline-none focus:border-indigo-500 cursor-pointer"
+              title="Font Family"
+            >
+              {/* Keep extracted PDF font stack if it's custom */}
+              {![
+                "'Arimo', Arial, Helvetica, sans-serif",
+                "'Carlito', Calibri, 'Segoe UI', Arial, sans-serif",
+                "'Roboto', 'Arimo', Arial, sans-serif",
+                "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+                "'Open Sans', 'Arimo', Arial, sans-serif",
+                "'Lato', 'Arimo', Arial, sans-serif",
+                "'Montserrat', 'Arimo', Arial, sans-serif",
+                "'Poppins', 'Arimo', Arial, sans-serif",
+                "'Tinos', 'Times New Roman', Times, serif",
+                "Georgia, 'Tinos', 'Times New Roman', serif",
+                "'Caladea', Cambria, Georgia, 'Times New Roman', serif",
+                "'EB Garamond', Garamond, 'Times New Roman', serif",
+                "'Merriweather', Georgia, 'Times New Roman', serif",
+                "'Cousine', 'Courier New', Courier, monospace",
+              ].includes(activeText.fontFamily) && (
+                <option value={activeText.fontFamily}>
+                  {activeText.fontName
+                    ? `PDF Font (${activeText.fontName.replace(/^[A-Z]{6}\+/, '').split(/[-+,]/)[0]})`
+                    : 'Document Font'}
+                </option>
+              )}
+              <optgroup label="Sans-Serif">
+                <option value="'Arimo', Arial, Helvetica, sans-serif">Arial / Helvetica</option>
+                <option value="'Carlito', Calibri, 'Segoe UI', Arial, sans-serif">Calibri</option>
+                <option value="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">Inter</option>
+                <option value="'Roboto', 'Arimo', Arial, sans-serif">Roboto</option>
+                <option value="'Open Sans', 'Arimo', Arial, sans-serif">Open Sans</option>
+                <option value="'Lato', 'Arimo', Arial, sans-serif">Lato</option>
+                <option value="'Montserrat', 'Arimo', Arial, sans-serif">Montserrat</option>
+                <option value="'Poppins', 'Arimo', Arial, sans-serif">Poppins</option>
+              </optgroup>
+              <optgroup label="Serif">
+                <option value="'Tinos', 'Times New Roman', Times, serif">Times New Roman</option>
+                <option value="Georgia, 'Tinos', 'Times New Roman', serif">Georgia</option>
+                <option value="'Caladea', Cambria, Georgia, 'Times New Roman', serif">Cambria</option>
+                <option value="'EB Garamond', Garamond, 'Times New Roman', serif">Garamond</option>
+                <option value="'Merriweather', Georgia, 'Times New Roman', serif">Merriweather</option>
+              </optgroup>
+              <optgroup label="Monospace">
+                <option value="'Cousine', 'Courier New', Courier, monospace">Courier New</option>
+              </optgroup>
+            </select>
+
             {/* Font Size controls */}
             <div className="flex items-center gap-1 bg-white border border-slate-200 px-2 py-0.5 rounded text-xs">
               <span className="font-mono font-medium text-slate-800">
@@ -874,7 +926,7 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
                     selectedElement?.type === 'text' &&
                     selectedElement?.id === item.id;
 
-                  const isModified = item.currentText !== item.originalText;
+                  const isModified = item.currentText !== item.originalText || Boolean(item.hasBeenModified);
 
                   const left = (item.x / pageWidth) * 100;
                   const top = ((pageHeight - item.y - item.height) / pageHeight) * 100;
@@ -936,30 +988,32 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
                         left: `${left}%`,
                         top: `${top}%`,
                         minWidth: `${Math.max(16, item.width * zoomScale)}px`,
+                        minHeight: `${Math.max(12, item.height * zoomScale)}px`,
                       }}
                     >
                       {isSelected ? (
                         <input
                           type="text"
                           autoFocus
+                          size={Math.max(1, item.currentText.length)}
                           value={item.currentText}
                           onChange={(e) => updateSelectedText({ currentText: e.target.value })}
-                          className="bg-transparent border-0 outline-none w-full px-1 py-0.5 leading-none"
+                          className="bg-transparent border-0 outline-none w-full px-0.5 py-0 leading-none"
                           style={{
                             fontFamily: item.fontFamily,
                             fontSize: `${(item.fontSize || 12) * zoomScale}px`,
-                            fontWeight: item.isBold ? 'bold' : 'normal',
+                            fontWeight: item.isBold ? 700 : 400,
                             fontStyle: item.isItalic ? 'italic' : 'normal',
                             color: item.color || '#0f172a',
                           }}
                         />
                       ) : (
                         <div
-                          className="px-1 py-0.5 whitespace-nowrap leading-none"
+                          className="px-0.5 py-0 whitespace-nowrap leading-none"
                           style={{
                             fontFamily: item.fontFamily,
                             fontSize: `${(item.fontSize || 12) * zoomScale}px`,
-                            fontWeight: item.isBold ? 'bold' : 'normal',
+                            fontWeight: item.isBold ? 700 : 400,
                             fontStyle: item.isItalic ? 'italic' : 'normal',
                             color: item.color || '#0f172a',
                           }}

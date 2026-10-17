@@ -38,6 +38,8 @@ export default function PDFEditorHome() {
           data: new Uint8Array(arrayBuffer.slice(0)),
           cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
           cMapPacked: true,
+          standardFontDataUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/standard_fonts/',
+          fontExtraProperties: true,
         }).promise;
         const pageCount = pdf.numPages;
 

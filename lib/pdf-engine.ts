@@ -4,6 +4,9 @@ import { PDFPageItem, ExtractedTextItem, ExtractedImageItem } from '@/types/pdf'
 
 let pdfjsLib: any = null;
 
+const PDFJS_CMAP_URL = 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/';
+const PDFJS_STANDARD_FONTS_URL = 'https://unpkg.com/pdfjs-dist@6.4.299/standard_fonts/';
+
 export async function getPdfJs() {
   if (typeof window === 'undefined') return null;
 
@@ -24,11 +27,292 @@ export async function getPdfJs() {
   }
 
   if (!pdfjsLib) {
-    const pdfjs = await import('pdfjs-dist');
+    // Use legacy build which includes core-js polyfills for Math.sumPrecise, Map.getOrInsertComputed, and Uint8Array.toBase64
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
     pdfjs.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.mjs';
     pdfjsLib = pdfjs;
   }
   return pdfjsLib;
+}
+
+/**
+ * Inspect OpenType / TrueType binary font tables (OS/2, head, post, name)
+ * to extract exact weight, italic, serif, monospace, and family names even when PDF font names are subsetted or obfuscated.
+ */
+function inspectOpenTypeFontData(data?: Uint8Array): {
+  isBold: boolean;
+  isItalic: boolean;
+  isSerif: boolean;
+  isMonospace: boolean;
+  weight: number;
+  names: Record<number, string>;
+} | null {
+  if (!data || data.byteLength < 12) return null;
+  try {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const numTables = view.getUint16(4, false);
+    if (numTables <= 0 || numTables > 120) return null;
+
+    let isBold = false;
+    let isItalic = false;
+    let isSerif = false;
+    let isMonospace = false;
+    let weight = 400;
+    const names: Record<number, string> = {};
+
+    for (let i = 0; i < numTables; i++) {
+      const eo = 12 + i * 16;
+      if (eo + 16 > data.byteLength) break;
+      const tag = String.fromCharCode(data[eo], data[eo + 1], data[eo + 2], data[eo + 3]);
+      const offset = view.getUint32(eo + 8, false);
+      const length = view.getUint32(eo + 12, false);
+      if (offset + length > data.byteLength) continue;
+
+      if (tag === 'OS/2' && length >= 6) {
+        const usWeightClass = view.getUint16(offset + 4, false);
+        if (usWeightClass >= 100 && usWeightClass <= 1000) {
+          weight = usWeightClass;
+          if (usWeightClass >= 600) isBold = true;
+        }
+        if (length >= 42) {
+          const panoseSerif = data[offset + 33];
+          const panoseWeight = data[offset + 34];
+          const panoseProp = data[offset + 35];
+          if (panoseSerif >= 2 && panoseSerif <= 10) isSerif = true;
+          if (panoseWeight >= 7) isBold = true;
+          if (panoseProp === 9) isMonospace = true;
+        }
+        if (length >= 64) {
+          const fsSelection = view.getUint16(offset + 62, false);
+          if ((fsSelection & 0x20) !== 0) isBold = true;
+          if ((fsSelection & 0x01) !== 0 || (fsSelection & 0x200) !== 0) isItalic = true;
+        }
+      } else if (tag === 'head' && length >= 46) {
+        const macStyle = view.getUint16(offset + 44, false);
+        if ((macStyle & 0x01) !== 0) isBold = true;
+        if ((macStyle & 0x02) !== 0) isItalic = true;
+      } else if (tag === 'post' && length >= 16) {
+        const italicAngle = view.getInt32(offset + 4, false);
+        const isFixedPitch = view.getUint32(offset + 12, false);
+        if (italicAngle !== 0) isItalic = true;
+        if (isFixedPitch !== 0) isMonospace = true;
+      } else if (tag === 'name' && length >= 6) {
+        const count = view.getUint16(offset + 2, false);
+        const strOffset = view.getUint16(offset + 4, false);
+        for (let j = 0; j < count; j++) {
+          const ro = offset + 6 + j * 12;
+          if (ro + 12 > offset + length) break;
+          const platformID = view.getUint16(ro, false);
+          const nameID = view.getUint16(ro + 6, false);
+          const strLen = view.getUint16(ro + 8, false);
+          const strPos = offset + strOffset + view.getUint16(ro + 10, false);
+          if (strPos + strLen > offset + length) continue;
+
+          if (platformID === 1 && (nameID === 1 || nameID === 2 || nameID === 4 || nameID === 6)) {
+            let s = '';
+            for (let k = 0; k < strLen; k++) {
+              const ch = data[strPos + k];
+              if (ch >= 32 && ch <= 126) s += String.fromCharCode(ch);
+            }
+            if (s && !names[nameID]) names[nameID] = s;
+          } else if (platformID === 3 && (nameID === 1 || nameID === 2 || nameID === 4 || nameID === 6)) {
+            let s = '';
+            for (let k = 0; k + 1 < strLen; k += 2) {
+              const ch = view.getUint16(strPos + k, false);
+              if (ch >= 32 && ch <= 126) s += String.fromCharCode(ch);
+            }
+            if (s) names[nameID] = s;
+          }
+        }
+      }
+    }
+    return { isBold, isItalic, isSerif, isMonospace, weight, names };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a PDF.js font object from page.commonObjs or page.objs.
+ * In browsers, PDF.js binds FontFace asynchronously before resolving commonObjs,
+ * so we must await the callback even if .has(fontKey) is initially false.
+ */
+async function resolvePdfFontObject(page: any, fontKey: string): Promise<any> {
+  if (!fontKey) return null;
+  try {
+    if (page.commonObjs && typeof page.commonObjs.has === 'function' && page.commonObjs.has(fontKey)) {
+      return page.commonObjs.get(fontKey);
+    }
+    if (page.objs && typeof page.objs.has === 'function' && page.objs.has(fontKey)) {
+      return page.objs.get(fontKey);
+    }
+  } catch {
+    // Fall through to async callback resolution
+  }
+
+  return new Promise<any>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          if (page.commonObjs?.has?.(fontKey)) {
+            resolve(page.commonObjs.get(fontKey));
+            return;
+          }
+          if (page.objs?.has?.(fontKey)) {
+            resolve(page.objs.get(fontKey));
+            return;
+          }
+        } catch {}
+        resolve(null);
+      }
+    }, 1200);
+
+    try {
+      const pool = fontKey.startsWith('g_') ? page.commonObjs : (page.commonObjs || page.objs);
+      if (pool && typeof pool.get === 'function') {
+        pool.get(fontKey, (fontObj: any) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(fontObj || null);
+          }
+        });
+      } else {
+        clearTimeout(timer);
+        resolve(null);
+      }
+    } catch {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    }
+  });
+}
+
+/**
+ * Map a raw PDF font string and style flags to an accurate, metric-compatible CSS font-family stack.
+ */
+export function resolveMatchingFontStack(
+  combinedFontStr: string,
+  cleanFamilyName: string,
+  isSerif: boolean,
+  isMonospace: boolean
+): string {
+  const s = combinedFontStr.toLowerCase();
+
+  // Monospace families
+  if (
+    isMonospace ||
+    s.includes('courier') ||
+    s.includes('cousine') ||
+    s.includes('consolas') ||
+    s.includes('menlo') ||
+    s.includes('monaco') ||
+    s.includes('mono') ||
+    s.includes('fira code') ||
+    s.includes('firacode') ||
+    s.includes('jetbrains') ||
+    s.includes('lucida console') ||
+    s.includes('inconsolata') ||
+    s.includes('source code') ||
+    s.includes('cmtt')
+  ) {
+    if (s.includes('consolas') || s.includes('menlo') || s.includes('monaco')) {
+      return 'Consolas, Menlo, Monaco, "Cousine", "Courier New", monospace';
+    }
+    return '"Courier New", "Cousine", Courier, Consolas, Menlo, monospace';
+  }
+
+  // Specific Sans-Serif & Serif document families
+  if (s.includes('calibri') || s.includes('carlito')) {
+    return 'Calibri, "Carlito", "Segoe UI", "Arimo", Arial, sans-serif';
+  }
+  if (s.includes('cambria') || s.includes('caladea')) {
+    return 'Cambria, "Caladea", Georgia, "Tinos", "Times New Roman", serif';
+  }
+  if (s.includes('garamond') || s.includes('baskerville') || s.includes('caslon') || s.includes('minion')) {
+    return '"EB Garamond", Garamond, Baskerville, "Times New Roman", Georgia, serif';
+  }
+  if (s.includes('georgia') || s.includes('merriweather') || s.includes('lora') || s.includes('playfair')) {
+    return 'Georgia, "Merriweather", "Times New Roman", Times, serif';
+  }
+  if (s.includes('palatino') || s.includes('book antiqua') || s.includes('bookantiqua') || s.includes('palladio')) {
+    return '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
+  }
+  if (
+    s.includes('times') ||
+    s.includes('tinos') ||
+    s.includes('nimbusrom') ||
+    s.includes('liberationserif') ||
+    s.includes('liberation serif') ||
+    s.includes('cmr') ||
+    s.includes('cmbx') ||
+    s.includes('cmti')
+  ) {
+    return '"Times New Roman", "Tinos", Times, Georgia, serif';
+  }
+  if (s.includes('roboto')) {
+    return '"Roboto", "Arimo", "Helvetica Neue", Arial, sans-serif';
+  }
+  if (s.includes('inter')) {
+    return '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif';
+  }
+  if (s.includes('open sans') || s.includes('opensans')) {
+    return '"Open Sans", "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif';
+  }
+  if (s.includes('lato')) {
+    return '"Lato", "Helvetica Neue", Arial, sans-serif';
+  }
+  if (
+    s.includes('montserrat') ||
+    s.includes('poppins') ||
+    s.includes('raleway') ||
+    s.includes('century gothic') ||
+    s.includes('centurygothic') ||
+    s.includes('futura') ||
+    s.includes('avant garde')
+  ) {
+    if (s.includes('poppins')) {
+      return '"Poppins", "Montserrat", "Helvetica Neue", Arial, sans-serif';
+    }
+    return '"Montserrat", "Poppins", "Century Gothic", Futura, "Helvetica Neue", Arial, sans-serif';
+  }
+  if (s.includes('segoe') || s.includes('tahoma') || s.includes('verdana') || s.includes('trebuchet')) {
+    if (s.includes('verdana')) {
+      return 'Verdana, "Segoe UI", Tahoma, Arial, sans-serif';
+    }
+    if (s.includes('tahoma')) {
+      return 'Tahoma, "Segoe UI", Verdana, Arial, sans-serif';
+    }
+    if (s.includes('trebuchet')) {
+      return '"Trebuchet MS", "Segoe UI", Arial, sans-serif';
+    }
+    return '"Segoe UI", Tahoma, "Roboto", "Helvetica Neue", Arial, sans-serif';
+  }
+  if (s.includes('arial') || s.includes('arimo') || s.includes('liberationsans') || s.includes('liberation sans')) {
+    return 'Arial, "Arimo", "Helvetica Neue", Helvetica, sans-serif';
+  }
+  if (s.includes('helvetica') || s.includes('nimbussan') || s.includes('swiss')) {
+    return '"Helvetica Neue", Helvetica, Arial, "Arimo", sans-serif';
+  }
+
+  // If we extracted a valid custom family name from OpenType table or PDF descriptor, prepend it
+  const customPrefix =
+    cleanFamilyName &&
+    cleanFamilyName.length > 2 &&
+    !/^(g_d\d+|f\d+|font\d+|cidfont|unknown|default|sans|serif|mono)/i.test(cleanFamilyName)
+      ? `"${cleanFamilyName.replace(/"/g, '')}", `
+      : '';
+
+  if (isSerif) {
+    return `${customPrefix}"Times New Roman", "Tinos", Times, Georgia, serif`;
+  }
+
+  return `${customPrefix}Arial, "Arimo", "Helvetica Neue", Helvetica, "Roboto", "Segoe UI", sans-serif`;
 }
 
 /**
@@ -44,8 +328,10 @@ export async function renderPageThumbnail(
 
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(arrayBuffer.slice(0)),
-    cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
+    cMapUrl: PDFJS_CMAP_URL,
     cMapPacked: true,
+    standardFontDataUrl: PDFJS_STANDARD_FONTS_URL,
+    fontExtraProperties: true,
   });
 
   const pdf = await loadingTask.promise;
@@ -87,8 +373,10 @@ export async function extractPageContentForEditing(
 
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(arrayBuffer.slice(0)),
-    cMapUrl: 'https://unpkg.com/pdfjs-dist@6.4.299/cmaps/',
+    cMapUrl: PDFJS_CMAP_URL,
     cMapPacked: true,
+    standardFontDataUrl: PDFJS_STANDARD_FONTS_URL,
+    fontExtraProperties: true,
   });
 
   const pdf = await loadingTask.promise;
@@ -118,9 +406,12 @@ export async function extractPageContentForEditing(
 
   const styles = textContent.styles || {};
 
-  // Build operator list to populate font objects in page.commonObjs and extract colors
+  // Build operator list to populate font objects in page.commonObjs and extract colors & synthetic bold (Tr = 2)
   let curColor = '#000000';
+  let curTextRenderingMode = 0;
   const colorMap = new Map<string, string>();
+  const fauxBoldSet = new Set<string>();
+  const fontKeysFromOps = new Set<string>();
   const imageItems: ExtractedImageItem[] = [];
 
   try {
@@ -129,25 +420,39 @@ export async function extractPageContentForEditing(
       const fn = ops.fnArray[j];
       const args = ops.argsArray[j];
 
-      // setFillRGBColor
-      if (fn === pdfjs.OPS.setFillRGBColor && args) {
+      if (fn === pdfjs.OPS.setFont && args && typeof args[0] === 'string') {
+        fontKeysFromOps.add(args[0]);
+      } else if (fn === pdfjs.OPS.setTextRenderingMode && args && typeof args[0] === 'number') {
+        curTextRenderingMode = args[0];
+      } else if (fn === pdfjs.OPS.setFillRGBColor && args) {
         if (typeof args[0] === 'string' && args[0].startsWith('#')) {
           curColor = args[0];
         } else if (args.length >= 3) {
-          const r = Math.min(255, Math.max(0, Math.round(args[0] * 255))).toString(16).padStart(2, '0');
-          const g = Math.min(255, Math.max(0, Math.round(args[1] * 255))).toString(16).padStart(2, '0');
-          const b = Math.min(255, Math.max(0, Math.round(args[2] * 255))).toString(16).padStart(2, '0');
+          const scale = args[0] > 1 || args[1] > 1 || args[2] > 1 ? 1 : 255;
+          const r = Math.min(255, Math.max(0, Math.round(args[0] * scale))).toString(16).padStart(2, '0');
+          const g = Math.min(255, Math.max(0, Math.round(args[1] * scale))).toString(16).padStart(2, '0');
+          const b = Math.min(255, Math.max(0, Math.round(args[2] * scale))).toString(16).padStart(2, '0');
           curColor = `#${r}${g}${b}`;
         }
       } else if (fn === pdfjs.OPS.setFillGray && args && args.length >= 1) {
         const grayVal = Math.min(255, Math.max(0, Math.round(args[0] * 255))).toString(16).padStart(2, '0');
         curColor = `#${grayVal}${grayVal}${grayVal}`;
+      } else if (fn === pdfjs.OPS.setFillCMYKColor && args && args.length >= 4) {
+        const [c, m, y, k] = args;
+        const r = Math.min(255, Math.max(0, Math.round(255 * (1 - c) * (1 - k)))).toString(16).padStart(2, '0');
+        const g = Math.min(255, Math.max(0, Math.round(255 * (1 - m) * (1 - k)))).toString(16).padStart(2, '0');
+        const b = Math.min(255, Math.max(0, Math.round(255 * (1 - y) * (1 - k)))).toString(16).padStart(2, '0');
+        curColor = `#${r}${g}${b}`;
       } else if (fn === pdfjs.OPS.showText && args && args[0]) {
         const textStr = Array.isArray(args[0])
           ? args[0].map((c: any) => (typeof c === 'object' && c !== null ? (c.unicode || c.fontChar || '') : c)).join('')
           : String(args[0]);
-        if (textStr && textStr.trim()) {
-          colorMap.set(textStr.trim(), curColor);
+        const trimmed = textStr ? textStr.trim() : '';
+        if (trimmed) {
+          colorMap.set(trimmed, curColor);
+          if (curTextRenderingMode === 2 || curTextRenderingMode === 6) {
+            fauxBoldSet.add(trimmed);
+          }
         }
       } else if (fn === pdfjs.OPS.paintImageXObject && args) {
         const objId = args[0];
@@ -165,28 +470,31 @@ export async function extractPageContentForEditing(
     console.warn('Could not inspect operator list:', e);
   }
 
-  // Pre-fetch actual font descriptors from page.commonObjs
-  const fontDescriptors = new Map<string, any>();
-  const fontNameKeys = Object.keys(styles);
+  // Collect all unique font keys from styles, items, and operator list
+  const allFontKeys = new Set<string>([
+    ...Object.keys(styles),
+    ...Array.from(fontKeysFromOps),
+    ...textContent.items.map((it: any) => it?.fontName).filter(Boolean),
+  ]);
 
-  for (const fontKey of fontNameKeys) {
-    try {
-      const fontObj = await new Promise<any>((resolve) => {
-        if (page.commonObjs && typeof page.commonObjs.has === 'function' && page.commonObjs.has(fontKey)) {
-          page.commonObjs.get(fontKey, (f: any) => resolve(f));
-        } else if (page.objs && typeof page.objs.has === 'function' && page.objs.has(fontKey)) {
-          page.objs.get(fontKey, (f: any) => resolve(f));
-        } else {
-          resolve(null);
-        }
-      });
+  // Pre-fetch actual font descriptors from page.commonObjs / page.objs in parallel
+  const fontDescriptors = new Map<string, any>();
+  const openTypeMetadata = new Map<string, ReturnType<typeof inspectOpenTypeFontData>>();
+
+  await Promise.all(
+    Array.from(allFontKeys).map(async (fontKey) => {
+      const fontObj = await resolvePdfFontObject(page, fontKey);
       if (fontObj) {
         fontDescriptors.set(fontKey, fontObj);
+        if (fontObj.data instanceof Uint8Array) {
+          const otInfo = inspectOpenTypeFontData(fontObj.data);
+          if (otInfo) {
+            openTypeMetadata.set(fontKey, otInfo);
+          }
+        }
       }
-    } catch (e) {
-      // Ignore font fetch failure
-    }
-  }
+    })
+  );
 
   const textItems: ExtractedTextItem[] = [];
 
@@ -197,56 +505,112 @@ export async function extractPageContentForEditing(
     const transform = item.transform;
     const x = transform[4];
     const y = transform[5];
-    const fontSize = Math.sqrt((transform[0] * transform[0]) + (transform[1] * transform[1])) || 12;
-    const width = item.width || (item.str.length * fontSize * 0.55);
+    const fontSize =
+      Math.hypot(transform[2], transform[3]) ||
+      Math.hypot(transform[0], transform[1]) ||
+      item.height ||
+      12;
+    const width = item.width || item.str.length * fontSize * 0.55;
     const height = item.height || fontSize;
 
     const fontStyleObj = styles[item.fontName] || {};
     const fontDesc = fontDescriptors.get(item.fontName) || {};
+    const otInfo = openTypeMetadata.get(item.fontName) || null;
 
-    const fontNameRaw = fontDesc.name || fontDesc.loadedName || item.fontName || '';
-    const fontFamilyRaw = fontDesc.family || fontStyleObj.fontFamily || '';
-    const combinedFontStr = `${fontNameRaw} ${fontFamilyRaw}`.toLowerCase();
+    // Gather all known naming sources for this font
+    const pdfFontName = fontDesc.name || '';
+    const otFamilyName = otInfo?.names[1] || '';
+    const otSubfamilyName = otInfo?.names[2] || '';
+    const otFullName = otInfo?.names[4] || '';
+    const otPsName = otInfo?.names[6] || '';
+    const sysBaseName = fontDesc.systemFontInfo?.baseFontName || '';
+    const cssFontFamily = fontDesc.cssFontInfo?.fontFamily || '';
+    const cssFontWeight = String(fontDesc.cssFontInfo?.fontWeight || '');
+    const styleSubName = fontStyleObj.fontSubstitutionLoadedName || fontStyleObj.fontSubstitution || '';
+    const fallbackFamily = fontDesc.fallbackName || fontStyleObj.fontFamily || '';
 
-    // Accurate bold check from font descriptors or name keywords
+    const combinedFontStr = [
+      pdfFontName,
+      otFamilyName,
+      otSubfamilyName,
+      otFullName,
+      otPsName,
+      sysBaseName,
+      cssFontFamily,
+      styleSubName,
+      fontDesc.loadedName || '',
+      fallbackFamily,
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    const isLightWeight = /light|thin|hairline|extralight|ultralight/i.test(combinedFontStr);
+
+    // Accurate bold detection across PDF descriptor, OpenType OS/2 & head tables, CSS weight, keywords, and Tr=2 faux bold
     const isBold = Boolean(
-      fontDesc.bold || 
-      fontDesc.black || 
-      fontStyleObj.bold === true ||
-      combinedFontStr.includes('bold') || 
-      combinedFontStr.includes('black') || 
-      combinedFontStr.includes('heavy') || 
-      combinedFontStr.includes('medium') || 
-      combinedFontStr.includes('semibold')
+      fontDesc.bold === true ||
+        fontDesc.black === true ||
+        fontStyleObj.bold === true ||
+        otInfo?.isBold === true ||
+        fauxBoldSet.has(item.str.trim()) ||
+        Number(cssFontWeight) >= 600 ||
+        cssFontWeight.toLowerCase() === 'bold' ||
+        (!isLightWeight &&
+          (combinedFontStr.includes('bold') ||
+            combinedFontStr.includes('black') ||
+            combinedFontStr.includes('heavy') ||
+            combinedFontStr.includes('semibold') ||
+            combinedFontStr.includes('demibold') ||
+            combinedFontStr.includes('extrabold') ||
+            combinedFontStr.includes('ultrabold') ||
+            combinedFontStr.includes('medium') ||
+            combinedFontStr.includes('negrito') ||
+            combinedFontStr.includes('negrita') ||
+            combinedFontStr.includes('gras') ||
+            combinedFontStr.includes('fett') ||
+            /(?:^|[-,_+ ])(bd|bld|demi|medi|semibd|blk|cmbx|cmb\d)/i.test(combinedFontStr) ||
+            /(?:[-,_ ])(600|700|800|900|w6|w7|w8|w9)(?:$|[^0-9])/i.test(combinedFontStr)))
     );
 
-    // Accurate italic check from font descriptors or name keywords
+    // Accurate italic/oblique detection across PDF descriptor, OpenType tables, and multi-language style keywords
     const isItalic = Boolean(
-      fontDesc.italic || 
-      fontStyleObj.italic === true ||
-      combinedFontStr.includes('italic') || 
-      combinedFontStr.includes('oblique')
+      fontDesc.italic === true ||
+        fontStyleObj.italic === true ||
+        otInfo?.isItalic === true ||
+        Boolean(fontDesc.cssFontInfo?.italicAngle && Number(fontDesc.cssFontInfo.italicAngle) !== 0) ||
+        combinedFontStr.includes('italic') ||
+        combinedFontStr.includes('oblique') ||
+        combinedFontStr.includes('slanted') ||
+        combinedFontStr.includes('italico') ||
+        combinedFontStr.includes('itálico') ||
+        combinedFontStr.includes('italique') ||
+        combinedFontStr.includes('cursiva') ||
+        combinedFontStr.includes('kursiv') ||
+        /(?:^|[-,_+ ])(it|ita|obl|inclined|cmti|cmsl)/i.test(combinedFontStr)
     );
 
-    // Determine font family classification
-    let fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+    const isMonospace = Boolean(
+      fontDesc.isMonospace === true ||
+        otInfo?.isMonospace === true ||
+        fallbackFamily.toLowerCase() === 'monospace'
+    );
 
-    if (
-      combinedFontStr.includes('times') || 
-      combinedFontStr.includes('georgia') || 
-      combinedFontStr.includes('garamond') ||
-      combinedFontStr.includes('cambria')
-    ) {
-      fontFamily = '"Times New Roman", Times, Georgia, serif';
-    } else if (
-      combinedFontStr.includes('courier') || 
-      combinedFontStr.includes('mono') || 
-      combinedFontStr.includes('consolas') || 
-      combinedFontStr.includes('code')
-    ) {
-      fontFamily = '"Courier New", Courier, monospace';
-    }
+    const isSerif = Boolean(
+      !isMonospace &&
+        (fontDesc.isSerifFont === true ||
+          otInfo?.isSerif === true ||
+          fallbackFamily.toLowerCase() === 'serif')
+    );
 
+    // Clean the primary family name (strip subset prefix like "BCDEEE+" and style suffixes like "-BoldMT")
+    const rawPrimaryName = (otFamilyName || pdfFontName || sysBaseName || '')
+      .replace(/^[A-Z]{6}\+/i, '')
+      .split(/[-,_]/)[0]
+      .replace(/(PS|MT|Std|Pro|LT|W1G|Regular|Bold|Italic|Oblique)$/i, '')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .trim();
+
+    const fontFamily = resolveMatchingFontStack(combinedFontStr, rawPrimaryName, isSerif, isMonospace);
     const extractedColor = colorMap.get(item.str.trim()) || '#0f172a';
 
     textItems.push({
@@ -258,9 +622,10 @@ export async function extractPageContentForEditing(
       width,
       height,
       fontSize: Math.round(fontSize * 10) / 10,
-      fontName: item.fontName || 'Helvetica',
+      fontName: rawPrimaryName || pdfFontName || item.fontName || 'Helvetica',
       fontFamily,
       isDeleted: false,
+      hasBeenModified: false,
       color: extractedColor,
       isBold,
       isItalic,
@@ -277,7 +642,7 @@ export async function extractPageContentForEditing(
 
 /**
  * Export PDF with in-place text edits, replacements, text/image redactions and replacements.
- * Preserves the exact font family, weight, slant, size, and position.
+ * Preserves the exact font family classification, weight, slant, size, and position.
  */
 export async function exportPDFDocument(
   pages: PDFPageItem[],
@@ -320,29 +685,50 @@ export async function exportPDFDocument(
     // In-place text replacements & redactions
     if (pageItem.textItems && pageItem.textItems.length > 0) {
       for (const item of pageItem.textItems) {
-        const isModified = item.currentText !== item.originalText;
+        const isModified = item.currentText !== item.originalText || Boolean(item.hasBeenModified);
         const isDeleted = item.isDeleted;
 
         if (isModified || isDeleted) {
-          const padding = 2;
+          const descentPad = Math.max(2.5, (item.fontSize || 12) * 0.22);
           copiedPage.drawRectangle({
-            x: Math.max(0, item.x - padding),
-            y: Math.max(0, item.y - padding),
-            width: item.width + (padding * 2),
-            height: item.height + (padding * 2),
+            x: Math.max(0, item.x - 1.5),
+            y: Math.max(0, item.y - descentPad),
+            width: item.width + 4,
+            height: item.height + descentPad + 2,
             color: rgb(1, 1, 1),
           });
 
           if (!isDeleted && item.currentText.trim() !== '') {
-            const fam = (item.fontFamily || item.fontName || '').toLowerCase();
+            const fam = `${item.fontFamily || ''} ${item.fontName || ''}`.toLowerCase();
             let font = fonts.helvetica;
 
-            if (fam.includes('times') || fam.includes('georgia') || fam.includes('garamond')) {
+            const isMono =
+              fam.includes('courier') ||
+              fam.includes('cousine') ||
+              fam.includes('consolas') ||
+              fam.includes('menlo') ||
+              fam.includes('monaco') ||
+              fam.includes('monospace');
+
+            const isSerif =
+              !isMono &&
+              (fam.includes('times') ||
+                fam.includes('tinos') ||
+                fam.includes('georgia') ||
+                fam.includes('garamond') ||
+                fam.includes('cambria') ||
+                fam.includes('caladea') ||
+                fam.includes('merriweather') ||
+                fam.includes('palatino') ||
+                fam.includes('baskerville') ||
+                (fam.includes('serif') && !fam.includes('sans-serif')));
+
+            if (isSerif) {
               if (item.isBold && item.isItalic) font = fonts.timesBoldItalic;
               else if (item.isBold) font = fonts.timesBold;
               else if (item.isItalic) font = fonts.timesItalic;
               else font = fonts.times;
-            } else if (fam.includes('courier') || fam.includes('mono')) {
+            } else if (isMono) {
               if (item.isBold && item.isItalic) font = fonts.courierBoldOblique;
               else if (item.isBold) font = fonts.courierBold;
               else if (item.isItalic) font = fonts.courierOblique;
