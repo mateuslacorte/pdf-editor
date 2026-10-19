@@ -268,6 +268,41 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
     setSelectedElement(null);
   };
 
+  // Delete an entire page from the document
+  const handleDeletePage = (pageIndex: number) => {
+    if (pages.length <= 1) {
+      if (window.confirm('Deleting the only page will clear the entire document. Proceed?')) {
+        onReset();
+      }
+      return;
+    }
+
+    if (!window.confirm(`Are you sure you want to delete Page ${pageIndex + 1}?`)) {
+      return;
+    }
+
+    // Adjust or clear selected element if on or after deleted page
+    if (selectedElement) {
+      if (selectedElement.pageIndex === pageIndex) {
+        setSelectedElement(null);
+      } else if (selectedElement.pageIndex > pageIndex) {
+        setSelectedElement({
+          ...selectedElement,
+          pageIndex: selectedElement.pageIndex - 1,
+        });
+      }
+    }
+
+    const nextPages = pages
+      .filter((_, idx) => idx !== pageIndex)
+      .map((p, idx) => ({
+        ...p,
+        pageNumber: idx + 1,
+      }));
+
+    onUpdatePages(nextPages);
+  };
+
   // Revert selected item
   const handleRevertSelected = () => {
     if (!selectedElement || selectedElement.type !== 'text') return;
@@ -552,7 +587,7 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
               <FileUp className="w-4 h-4" />
             </div>
             <span className="font-semibold text-slate-900 text-sm hidden sm:inline">
-              PDF MVP
+              PDF Editor
             </span>
           </div>
 
@@ -862,6 +897,17 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
                           Page {index + 1}
                         </span>
                       </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeletePage(index);
+                        }}
+                        className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition"
+                        title={`Delete Page ${index + 1}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
 
                     {/* Thumbnail preview image */}
@@ -910,6 +956,27 @@ export const WordStyleEditor: React.FC<WordStyleEditorProps> = ({
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
+                {/* Page Action Bar */}
+                <div 
+                  className="absolute -top-7 left-0 right-0 flex items-center justify-between text-xs px-1 pointer-events-auto"
+                >
+                  <span className="font-semibold text-slate-500 text-[11px]">
+                    Page {pIdx + 1} of {pages.length}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeletePage(pIdx);
+                    }}
+                    className="flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-rose-600 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 shadow-xs px-2 py-0.5 rounded transition"
+                    title={`Delete Page ${pIdx + 1}`}
+                  >
+                    <Trash2 className="w-3 h-3 text-rose-500" />
+                    <span>Delete Page</span>
+                  </button>
+                </div>
+
                 {/* Crisp Background Raster Page */}
                 {page.thumbnailUrl && (
                   <img

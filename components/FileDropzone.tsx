@@ -54,7 +54,7 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({ onFilesSelected, isL
           <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-600/20 font-bold">
             <FileUp className="w-5 h-5" />
           </div>
-          <span className="text-xl font-bold text-slate-900 tracking-tight">PDF MVP</span>
+          <span className="text-xl font-bold text-slate-900 tracking-tight">PDF Editor</span>
         </div>
 
         {/* Minimal Dropzone Card */}

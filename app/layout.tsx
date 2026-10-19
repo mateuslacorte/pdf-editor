@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PDF MVP",
-  description: "Client-side PDF document manipulation and editing MVP",
+  title: "PDF Editor",
+  description: "Client-side PDF document manipulation and editing suite",
   icons: {
     icon: "/icon.svg",
   },
